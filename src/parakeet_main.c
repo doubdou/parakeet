@@ -4,7 +4,7 @@
 #include "parakeet_core_mysqldb.h"
 #include "parakeet_core_sniffer.h"
 #include "parakeet_session.h"
-#include "parakeet_audio.h"
+#include "parakeet_stream.h"
 
 
 static apr_thread_cond_t * _cond = NULL;
@@ -45,6 +45,9 @@ static int parakeet_main(int argc, char* argv[])
 		// 如果没有 ../log 目录则创建.
 		apr_dir_make_recursive("../log", APR_UREAD | APR_UWRITE | APR_UEXECUTE, pool);
 
+	    // 如果没有 ../var 目录则创建.
+		apr_dir_make_recursive("../var", APR_UREAD | APR_UWRITE | APR_UEXECUTE, pool);
+
 		// 初始化日志系统, 使用第三方库 zlog 处理日志.
 		// 使用前请在系统中先源码安装zlog.
 		ret = dzlog_init("../conf/log.conf", "parakeet");
@@ -55,9 +58,9 @@ static int parakeet_main(int argc, char* argv[])
 		}
 		
 		dzlog_notice("+-------------------------------------+");
-		dzlog_notice("| 	   Parakeet                 |");
-		dzlog_notice("|            ver 1.0                  |");
-		dzlog_notice("| 	   Build "__DATE__ "        |");
+		dzlog_notice("| 	   Parakeet                     |");
+		dzlog_notice("|        ver 1.0                      |");
+		dzlog_notice("| 	   Build "__DATE__ "            |");
 		dzlog_notice("+-------------------------------------+");
 		dzlog_notice("Parakeet initializing....");
 
@@ -92,7 +95,7 @@ static int parakeet_main(int argc, char* argv[])
             break;
 	    }		
 		//音频解码器
-		errcode = parakeet_audio_factory_init(pool);
+		errcode = parakeet_stream_factory_init(pool);
 		if(errcode != PARAKEET_OK)
 		{
 		    dzlog_error("parakeet_audio_factory_init error(%d)", errcode);

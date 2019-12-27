@@ -39,7 +39,6 @@ extern "C"
 #define PT_G729		 18
 #define PT_RFC2833   101
 
-
 #define ETH_HDR_LENGTH   	    sizeof(eth_header_t)
 #define ETH_8021Q_TAG_LENGTH    sizeof(eth_8021q_tag_t)
 #define IP_HDR_LENGTH  		    sizeof(ip_header_t)
@@ -150,8 +149,6 @@ typedef struct rtppacket_s{
 	void*          	media_data;
 }rtppacket_t;
 
-
-
 /** for g711 decoder */
 #define         SIGN_BIT        (0x80)      /* Sign bit for a A-law byte. */
 #define         QUANT_MASK      (0xf)       /* Quantization field mask. */
@@ -165,7 +162,7 @@ typedef struct rtppacket_s{
 #define			G711_U_LAW		(1)
 #define			G711_DATA_LEN	(160)
 
-
+#if 0
 short seg_aend[8] = {
 	0x1F, 0x3F, 0x7F, 0xFF,
 	0x1FF, 0x3FF, 0x7FF, 0xFFF
@@ -243,6 +240,7 @@ res_bitmap_t res_bitmap_rel[32]= {
 {0xefffffff},{0xdfffffff},{0xbfffffff},{0x7fffffff},
 };
 
+#endif
 
 #ifdef __cplusplus
 }

@@ -183,15 +183,17 @@ static int parakeet_config_from_xml(apr_pool_t * pool)
 
 parakeet_errcode_t parakeet_config_load(apr_pool_t * pool)
 {
-    parakeet_errcode_t errcode = PARAKEET_OK;
+    parakeet_errcode_t err = PARAKEET_OK;
 
-	errcode = parakeet_config_from_xml(pool);
-	if(errcode != PARAKEET_OK)
+	err = parakeet_config_from_xml(pool);
+	if(err != PARAKEET_OK)
 	{
-        dzlog_error("parakeet_config_from_xml error (%d)", errcode);
+        dzlog_error("parakeet_config_from_xml error (%d)", err);
+	    goto done;
 	}
-	
-    return errcode;
+
+done:
+    return err;
 }
 
 parakeet_global_config_t * parakeet_get_config(void)

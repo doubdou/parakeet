@@ -1,6 +1,12 @@
 #ifndef PARAKEET_UTILS_H
 #define PARAKEET_UTILS_H
 
+#ifdef _DEBUG
+#define TRACE	dzlog_info
+#else
+#define TRACE	if(0) printf
+#endif
+
 #include <stdio.h>
 
 // APR 库.
@@ -29,7 +35,7 @@
 
 
 #include "../libfranksip/sip_message.h"
-
+#include "../libfranksip/sdp_message.h"
 
 typedef enum parakeet_errcode_e{
     PARAKEET_OK,
@@ -39,11 +45,24 @@ typedef enum parakeet_errcode_e{
 	PARAKEET_PARAM_INVALID,
 	PARAKEET_INTR,
 	PARAKEET_INUSE,
+	PARAKEET_NOT_EXIST,
 	PARAKEET_SOCKERR,
 	PARAKEET_BREAK,
 	PARAKEET_TERM,
 	PARAKEET_DATA_ERROR,
 }parakeet_errcode_t;
+
+#define DIR_STR_INCOMING	"incoming"
+#define DIR_STR_OUTGOING	"outgoing"
+#define DIR_STR_BOTH		"both"
+
+typedef enum packet_direction_e
+{
+	// 包的方向
+	PKT_DIRECT_ANY=0,
+	PKT_DIRECT_INCOMING, //收到
+	PKT_DIRECT_OUTGOING, //送出
+}packet_direction_t;
 
 
 #endif

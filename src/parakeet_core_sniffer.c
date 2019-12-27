@@ -1,9 +1,31 @@
 #include "parakeet_config.h"
 #include "parakeet_core_sniffer.h"
 #include "parakeet_com.h"
+#include "parakeet_stream.h"
 
 static parakeet_sniffer_manager_t * sniffer_globals = 0;
 
+static void packet_direction_check(ip_header_t* iphdr, struct sockaddr_in	addr, packet_direction_t* d)
+{
+	char src_ip_str[16];
+	char dst_ip_str[16];
+
+    if(iphdr == NULL || d == NULL)
+    {
+        dzlog_error("packet_direction_check error(param invalid)!");
+		return;
+    }
+
+	sprintf(src_ip_str, "%u.%u.%u.%u", iphdr->sourceIP[0], iphdr->sourceIP[1], iphdr->sourceIP[2], iphdr->sourceIP[3]);
+	sprintf(dst_ip_str, "%u.%u.%u.%u", iphdr->destIP[0], iphdr->destIP[1], iphdr->destIP[2], iphdr->destIP[3]);
+	if(strcmp(src_ip_str, inet_ntoa(addr.sin_addr)) == 0){
+		*d = PKT_DIRECT_OUTGOING;
+	}else if(strcmp(dst_ip_str, inet_ntoa(addr.sin_addr)) == 0){
+		*d = PKT_DIRECT_INCOMING;
+	}
+	
+    return;
+}
 
 static int rtp_payload_check(const char *data) 
 {
@@ -64,34 +86,222 @@ fail:
     return -1;
 }
 
-parakeet_errcode_t parakeet_sip_message_entry(uint8_t* data, uint32_t data_len)
+parakeet_errcode_t parakeet_sip_message_entry(uint8_t* data, uint32_t data_len, packet_direction_t d)
 {
     parakeet_errcode_t err = PARAKEET_OK;
     sip_message_t* sip     = NULL;
+
+	const char * method;		// 方法,临时变量
 	// 解析SIP消息.
 	sip = sip_message_parse((char*)data, (int)data_len);
 
-    dzlog_info("sip %s call-id:%s from:%s to:%s", 
-		sip_message_get_method(sip),sip_message_get_call_id(sip), sip_message_get_from_host(sip), sip_message_get_to_host(sip));
-    
+	// 检查SIP消息是否合法.
+	if (0 != sip_message_verify(sip))
+	{
+		dzlog_warn("bad sip! sip_message_verify fail.");
+		err = PARAKEET_TERM;
+		goto done;
+	}
+
+	// 获取Method, 如果是Request的话.
+	method = sip_message_get_method(sip);
+	if (method)
+	{
+		TRACE("REQUEST, Method[%s] ----- begin:[%s] ----- ####################", method, sip_message_get_call_id(sip));
+		
+		if (!apr_strnatcasecmp(method, SIP_INVITE))
+		{
+			on_parakeet_invite(sip, d);
+			goto done;
+		}
+		if (!apr_strnatcasecmp(method, SIP_ACK))
+		{
+			on_parakeet_ack(sip);
+		}
+		else if (!apr_strnatcasecmp(method, SIP_BYE))
+		{
+			on_parakeet_bye(sip, d);
+		}
+		else if (!apr_strnatcasecmp(method, SIP_CANCEL))
+		{
+			on_parakeet_cancel(sip);
+		}
+		else if (!apr_strnatcasecmp(method, SIP_REGISTER))
+		{
+			on_parakeet_register(sip);
+		}
+		else if (!apr_strnatcasecmp(method, SIP_OPTIONS))
+		{
+			on_parakeet_options(sip);
+		}
+		else if (!apr_strnatcasecmp(method, SIP_INFO))
+		{
+			on_parakeet_info(sip);
+		}
+		else
+		{
+			on_parakeet_unknown(sip);
+		}
+		TRACE("REQUEST, Method[%s] ----- end:[%s] ----- !!!!!!!!!!!!!!!!!!!!", method, sip_message_get_call_id(sip));
+	}else {
+		// 没有Method, 则不是Request, 判断Response
+		int status_code = sip_message_get_status_code(sip);	
+		TRACE("RESPONSE, StatusCode[%d] ----- begin:[%s] ----- ######################", status_code, sip_message_get_call_id(sip));
+		switch (status_code)
+		{
+		case SIP_TRYING:
+			on_parakeet_trying(sip);
+			break;
+
+		case SIP_RINGING:
+		case SIP_SESSION_PROGRESS:
+			TRACE("Ringing Enter");
+			on_parakeet_ringing(sip);
+			TRACE("Ringing Leave");
+			break;
+
+		case SIP_OK:
+			method = sip_message_cseq_get_method(sip);
+			if (NULL == method)break;
+			if (!apr_strnatcasecmp(method, SIP_INVITE))
+			{
+				on_parakeet_answer(sip);
+			}
+			else if (!apr_strnatcasecmp(method, SIP_BYE))
+			{
+				on_parakeet_bye_ok(sip);
+			}
+			else if (!apr_strnatcasecmp(method, SIP_CANCEL))
+			{
+				on_parakeet_cancel_ok(sip);
+			}
+			else if (!apr_strnatcasecmp(method, SIP_OPTIONS))
+			{
+				on_parakeet_options(sip);
+			}
+			else if (!apr_strnatcasecmp(method, SIP_REGISTER))
+			{
+				on_parakeet_register(sip);
+			}
+			else if (!apr_strnatcasecmp(method, SIP_INFO))
+			{
+				on_parakeet_info_ok(sip);
+			}
+			break;
+
+		case SIP_REQUEST_TERMINATED:
+			TRACE("Terminated Enter");
+			on_parakeet_terminated(sip);
+			TRACE("Terminated Leave");
+			break;
+
+		case SIP_PROXY_AUTHENTICATION_REQUIRED:
+			// 呼出时需要鉴权.
+			if (0 == sip_message_cseq_match(sip, SIP_INVITE))
+			{
+				on_parakeet_authentication_required(sip);
+			}
+			break;
+
+		case SIP_CALL_TRANSACTION_DOES_NOT_EXIST:
+			// 会话不存在的处理.
+			TRACE("Does Not Exist Enter");
+			on_parakeet_transaction_does_not_exist(sip);
+			TRACE("Does Not Exist Leave");
+			break;
+
+		case SIP_UNAUTHORIZED:
+			// Gateway Client 注册返回
+			if (0 == sip_message_cseq_match(sip, SIP_REGISTER))
+			{
+				//on_gateway_register_unauthorized(sip);
+			}
+			else if (0 == sip_message_cseq_match(sip, SIP_INVITE))
+			{
+				on_parakeet_authentication_required(sip);
+			}
+			break;
+
+		case SIP_FORBIDDEN:
+			if (0 == sip_message_cseq_match(sip, SIP_REGISTER))
+			{
+				// 注册失败.
+				//on_gateway_register_forbidden(sip);
+			}
+			else if (0 == sip_message_cseq_match(sip, SIP_INVITE))
+			{
+				on_parakeet_callfail(sip);
+			}
+			break;
+
+		default:
+			TRACE("CallFailed Enter");
+			if (status_code >= SIP_BAD_REQUEST)
+			{
+				if (0 == sip_message_cseq_match(sip, SIP_INVITE))
+				{
+					on_parakeet_callfail(sip);
+				}
+			}
+			TRACE("CallFailed Leave");
+			break;
+		}
+		TRACE("RESPONSE, StatusCode[%d] ----- end:[%s] ----- !!!!!!!!!!!!!!!!!!!!", status_code, sip_message_get_call_id(sip));
+	}
+
+	sip_message_free(sip);
+
+    //dzlog_info("sip %s call-id:%s from: [user:%s host:%s] to: [user:%s host:%s]", 
+	//	sip_message_get_method(sip),sip_message_get_call_id(sip), 
+	//	sip_message_get_from_username(sip),sip_message_get_from_host(sip), sip_message_get_to_username(sip),sip_message_get_to_host(sip));
+
+done:
 	return err;
 }
 
-parakeet_errcode_t parakeet_rtp_message_entry(uint8_t* data, uint32_t data_len, apr_port_t sport, apr_port_t dport)
+parakeet_errcode_t parakeet_rtp_message_entry(uint8_t* data, uint32_t data_len, packet_direction_t d, apr_port_t sport, apr_port_t dport)
 {
     parakeet_errcode_t err = PARAKEET_OK;
 	rtp_header_t* rtp_hdr  = NULL;
-  	uint8_t* media_data    = NULL;
+	parakeet_stream_t * stream = NULL;
+  	uint8_t * media_data = NULL;
+    uint32_t media_len = 0;
 
 	rtp_hdr = (rtp_header_t*)data;
 	media_data = (uint8_t*)&data[RTP_HDR_LENGTH];
+    media_len = data_len - RTP_HDR_LENGTH;
 
-	dzlog_info("rtp datalen:%u header_len:%d ver:%u seq:%u payload:%u ssrc:%u media_data:%u", 
-		data_len, RTP_HDR_LENGTH, rtp_hdr->version, rtp_hdr->seq, rtp_hdr->payloadtype, rtp_hdr->ssrc, (uint32_t)strlen((char*)media_data));
+    /**
+    * 根据rtp_hdr    需要检查时间戳和 ssrc等
+    *
+    */
+   
+	assert(d != PKT_DIRECT_ANY);
+
+    if(d == PKT_DIRECT_INCOMING)
+    {
+       stream = parakeet_stream_locate(dport);
+	   if(stream == NULL)
+	   {
+		   goto done;
+	   }
+	   fwrite(media_data, 1, media_len, stream->audio_in);
+    }else {
+	   stream = parakeet_stream_locate(sport);
+	   if(stream == NULL)
+	   {
+		   goto done;
+	   }
+	   fwrite(media_data, 1, media_len, stream->audio_out);
+	}
+	
+ 	//dzlog_info("rtp datalen:%u header_len:%d ver:%u seq:%u payload:%u ssrc:%u media_data:%u", 
+	//	data_len, RTP_HDR_LENGTH, rtp_hdr->version, rtp_hdr->seq, rtp_hdr->payloadtype, rtp_hdr->ssrc, (uint32_t)strlen((char*)media_data));
+done:
+	parakeet_stream_unlock(stream);
 
 	return err;
 }
-
 
 static void parakeet_pcaploop_callback(unsigned char* arg, const struct pcap_pkthdr *header, const unsigned char *content)
 {
@@ -108,6 +318,7 @@ static void parakeet_pcaploop_callback(unsigned char* arg, const struct pcap_pkt
 	int data_len               = 0;
 	/* 局部变量 */
     apr_port_t port            = 0; 
+	packet_direction_t d       = PKT_DIRECT_ANY;
 
 
     //取得sip监听端口
@@ -125,6 +336,9 @@ static void parakeet_pcaploop_callback(unsigned char* arg, const struct pcap_pkt
     }
 
 	iphdr  = (ip_header_t*)&content[ip_hdr_pos];
+	
+    //判断IP包方向
+	packet_direction_check(iphdr, sniffer_globals->addr, &d);
 
 	if(iphdr->protocol == IP_PROTOCOL_NUM_UDP)
 	{
@@ -142,14 +356,14 @@ static void parakeet_pcaploop_callback(unsigned char* arg, const struct pcap_pkt
 	 	    //判断监听端口,进入SIP消息处理入口
 			if((ntohs(udphdr->sport) == port) || (ntohs(udphdr->dport) == port))
 			{   
-				parakeet_sip_message_entry(data, data_len);
+				parakeet_sip_message_entry(data, data_len, d);
 			}
         } 
 		else if(!rtp_payload_check((char*)data) && !((data_len - RTP_HDR_LENGTH) % 10))
         {
 			//RTP和RTCP比较类似, 为了将两者报文区分，需要判断有效负载(载荷)类型,再加上另外判断负载的数据大小,区分rtp包
 			//RTP消息处理入口.
-			parakeet_rtp_message_entry(data, data_len, udphdr->sport, udphdr->dport);
+			parakeet_rtp_message_entry(data, data_len, d, ntohs(udphdr->sport), ntohs(udphdr->dport));
         }
 		
 	}
@@ -167,7 +381,7 @@ static void parakeet_pcaploop_callback(unsigned char* arg, const struct pcap_pkt
 		{
 			if((ntohs(tcphdr->sport) == port) || (ntohs(tcphdr->dport) == port))
 			{ 
-			    parakeet_sip_message_entry(data, data_len);
+			    parakeet_sip_message_entry(data, data_len, d);
 		    }
 		} else{
               //在VoIP通话所用协议中, SIP协议可以选用UDP或TCP        ,        RTP一般只用UDP作为传输的承载
@@ -206,6 +420,8 @@ parakeet_errcode_t parakeet_sniffer_init(apr_pool_t * pool)
 {
     parakeet_errcode_t errcode = PARAKEET_OK;
     char errbuf[1024];
+	int sockfd;
+	struct ifreq ifr;
 
     dzlog_notice("initializing sniffer...");
 
@@ -213,12 +429,6 @@ parakeet_errcode_t parakeet_sniffer_init(apr_pool_t * pool)
 
     //内存池创建
     apr_pool_create(&sniffer_globals->pool, pool);	
-
-	// 读写锁
-	apr_thread_rwlock_create(&sniffer_globals->session_lock, pool);
-
-	sniffer_globals->next_session_id = 1;
-	sniffer_globals->sessions = apr_hash_make(sniffer_globals->pool);
 
 	//实时处理句柄
 	sniffer_globals->pcap_handle = pcap_open_live(parakeet_get_config()->nic, 65535, 1, 500, errbuf);
@@ -230,6 +440,18 @@ parakeet_errcode_t parakeet_sniffer_init(apr_pool_t * pool)
 	// 创建锁: 多线程同时操作网卡时互斥.
 	apr_thread_mutex_create(&sniffer_globals->packet_mutex, APR_THREAD_MUTEX_DEFAULT, sniffer_globals->pool);
 
+    //取得网卡设备信息
+    sockfd = socket(AF_INET,SOCK_DGRAM,0);
+	strncpy(ifr.ifr_name, parakeet_get_config()->nic, IFNAMSIZ);
+	ifr.ifr_name[IFNAMSIZ - 1] = 0;
+	if(ioctl(sockfd,SIOCGIFADDR,&ifr) == 0)
+	{
+	    memcpy(&sniffer_globals->addr, &ifr.ifr_addr, sizeof(sniffer_globals->addr));
+		dzlog_notice("obtain nic:%s  addr: %s", parakeet_get_config()->nic, inet_ntoa(sniffer_globals->addr.sin_addr) );
+	}else {
+        dzlog_error("can not obtain device(%s) info! exit...", parakeet_get_config()->nic);
+		return PARAKEET_TERM;
+	}
 
 	// 初始化SIP解析器.
 	sip_initialize();
@@ -257,13 +479,6 @@ parakeet_errcode_t parakeet_sniffer_startup(void)
 	{
 		apr_thread_create(&sniffer_globals->threads[i], NULL, parakeet_sniffer_runtime, NULL, sniffer_globals->pool);
 	}
-
-	// 线程池: 用于处理状态超时任务.
-	// 这里又为什么使用线程池? 因为状态机处理线程是一个单一线程, 触发的超时任务不可避免要分配到其它线程处理, 使用线程池比较合适.
-	apr_thread_pool_create(&sniffer_globals->state_thread_pool, 4, 16, sniffer_globals->pool);
-
-	// 线程: 状态处理, 扫描所有会话, 检查超时.
-	apr_thread_create(&sniffer_globals->state_thread_main, 0, parakeet_session_state_machine, 0, sniffer_globals->pool);
 
 	return err;
 }

@@ -1,6 +1,6 @@
 # network packet sniffer and decode audio server 
 
-AM_CFLAGS = -g -O3 -Wall -I$(prefix)/include
+AM_CFLAGS = -g -O3 -Wall -I$(prefix)/include -D_DEBUG
 AM_CPPFLAGS = -I$(prefix)/include
 
 bin_PROGRAMS = parakeet
@@ -9,7 +9,7 @@ bin_PROGRAMS = parakeet
 # Source files
 parakeet_SOURCES = \
             parakeet_main.c \
-            parakeet_audio.c \
+            parakeet_stream.c \
             parakeet_config.c \
             parakeet_core_mysqldb.c \
             parakeet_core_sniffer.c \
