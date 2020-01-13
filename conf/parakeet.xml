@@ -1,0 +1,78 @@
+<root>
+	<sniffer>
+		<!-- SIP的监听端口: siproxy.s -->
+		<port>5060</port>
+		<!-- 网卡设备名 -->
+		<nic>ens33</nic>
+		<!-- SIP处理线程数 -->
+		<thread-number>8</thread-number>
+		
+		<!-- 最大会话数 -->
+		<max-sessions>1000</max-sessions>
+		
+		<!-- SIP消息中User-Agent头域的值 -->
+		<user-agent>jinzw</user-agent>
+		
+		<!-- 呼叫超时时间(秒), 在接通前超过该时间则终止呼叫 -->
+		<call-timeout>60</call-timeout>
+		
+		<!-- 最大通话时间(秒), 任何超过该时间的会话都会被强制终止 -->
+		<call-limit>7200</call-limit>
+		
+		<!-- 是否支持写话单 -->
+		<cdr>true</cdr>
+
+		<lan>192.168.88.156</lan>
+    
+	    <!-- 是否支持rport -->
+	    <rport>true</rport>
+	</sniffer>
+
+       <stream>
+              <!-- 录音格式,双声道/单声道/原生 stereo/normal/native -->
+              <recordings>native</recordings>
+       </stream>
+
+	<http>
+		<!-- SIP Proxy Server中HTTP监听端口 -->
+		<port>11080</port>
+		<timeout>1800</timeout>
+	</http>
+
+	<redis>
+		<!-- Redis服务器地址 -->
+		<host>127.0.0.1</host>
+		
+		<!-- Redis的监听端口 -->
+		<port>6379</port>
+		
+		<!-- Redis连接数 -->
+		<number>4</number>
+	</redis>
+
+	<mysql>
+		<!-- MySQL数据库服务器IP地址 -->
+		<host>127.0.0.1</host>
+		
+		<!-- MySQL 数据库端口 -->
+		<port>3306</port>
+		
+		<!-- 数据库名称 -->
+		<name>siproxy</name>
+		
+		<!-- 数据库登录账号 -->
+		<user>root</user>
+		
+		<!-- 数据库登录密码 -->
+		<password>ynt#123456</password>
+	</mysql>
+	
+	<acl>
+		<!-- RFC 1918 -->
+		<!-- 以下IP地址段将作为内网IP, 除外的将被判断为外网 -->
+		<node cidr="10.0.0.0/8" />
+		<node cidr="172.16.0.0/12" />
+		<node cidr="192.168.0.0/16" />
+	</acl>
+</root>
+
