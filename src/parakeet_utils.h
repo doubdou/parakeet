@@ -37,6 +37,36 @@
 #include "../libfranksip/sip_message.h"
 #include "../libfranksip/sdp_message.h"
 
+/* size of the buffer */
+#define PARAKEET_BUFFER_SIZE       (1024 * 64)
+#define PARAKEET_BUFFER_BLOCKSIZE  (1024 * 512)
+#define PARAKEET_BYTES_PER_SAMPLE  (2)	      /* 2 bytes per sample */
+
+#define PARAKEET_RECOMMENDED_BUFFER_SIZE (8192)
+
+/*!
+  \brief Test for the existance of a flag on an arbitary object
+  \param obj the object to test
+  \param flag the or'd list of flags to test
+  \return true value if the object has the flags defined
+*/
+#define parakeet_test_flag(obj, flag) ((obj)->flags & flag)
+
+/*!
+  \brief Set a flag on an arbitrary object
+  \param obj the object to set the flags on
+  \param flag the or'd list of flags to set
+*/
+#define parakeet_set_flag(obj, flag) (obj)->flags |= (flag)
+
+
+/*!
+  \brief Free a pointer and set it to NULL unless it already is NULL
+  \param it the pointer
+*/
+#define parakeet_safe_free(it) if (it) {free(it);it=NULL;}
+
+
 typedef enum parakeet_errcode_e{
     PARAKEET_OK,
 	PARAKEET_FAIL,

@@ -11,6 +11,7 @@ parakeet_SOURCES = \
             parakeet_main.c \
             parakeet_stream.c \
             parakeet_config.c \
+			parakeet_codec.c \
             parakeet_core_mysqldb.c \
             parakeet_core_sniffer.c \
             parakeet_event_socket.c \

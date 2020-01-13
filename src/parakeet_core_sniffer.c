@@ -262,14 +262,22 @@ done:
 parakeet_errcode_t parakeet_rtp_message_entry(uint8_t* data, uint32_t data_len, packet_direction_t d, apr_port_t sport, apr_port_t dport)
 {
     parakeet_errcode_t err = PARAKEET_OK;
-	rtp_header_t* rtp_hdr  = NULL;
+	//rtp_header_t* rtp_hdr  = NULL;
 	parakeet_stream_t * stream = NULL;
-  	uint8_t * media_data = NULL;
-    uint32_t media_len = 0;
+	parakeet_buffer_t * raw_buffer;
+  	uint8_t * body = NULL;
+    uint32_t body_len = 0;
 
-	rtp_hdr = (rtp_header_t*)data;
-	media_data = (uint8_t*)&data[RTP_HDR_LENGTH];
-    media_len = data_len - RTP_HDR_LENGTH;
+	//rtp_hdr = (rtp_header_t*)data;
+	//body = (uint8_t*)&data[RTP_HDR_LENGTH];
+    //body_len = data_len - RTP_HDR_LENGTH;
+
+
+	rtp_msg_t* rtp_msg;
+
+    rtp_msg = (rtp_msg_t*)data;
+    body = rtp_msg->body;
+	body_len = data_len - RTP_HDR_LENGTH;
 
     /**
     * 根据rtp_hdr    需要检查时间戳和 ssrc等
@@ -280,20 +288,20 @@ parakeet_errcode_t parakeet_rtp_message_entry(uint8_t* data, uint32_t data_len, 
 
     if(d == PKT_DIRECT_INCOMING)
     {
-       stream = parakeet_stream_locate(dport);
-	   if(stream == NULL)
-	   {
-		   goto done;
-	   }
-	   fwrite(media_data, 1, media_len, stream->audio_in);
+        stream = parakeet_stream_locate(dport);
+	    raw_buffer = stream->raw_buffer_in;
     }else {
-	   stream = parakeet_stream_locate(sport);
-	   if(stream == NULL)
-	   {
-		   goto done;
-	   }
-	   fwrite(media_data, 1, media_len, stream->audio_out);
+	    stream = parakeet_stream_locate(sport);
+	    raw_buffer = stream->raw_buffer_out;
 	}
+
+	if(stream == NULL)
+    {
+        goto done;
+    }
+	//原始语音数据缓存处理
+	parakeet_buffer_write(raw_buffer, body, body_len);
+    //fwrite(media_data, 1, media_len, stream->audio_out);
 	
  	//dzlog_info("rtp datalen:%u header_len:%d ver:%u seq:%u payload:%u ssrc:%u media_data:%u", 
 	//	data_len, RTP_HDR_LENGTH, rtp_hdr->version, rtp_hdr->seq, rtp_hdr->payloadtype, rtp_hdr->ssrc, (uint32_t)strlen((char*)media_data));

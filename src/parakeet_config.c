@@ -89,6 +89,19 @@ static int parakeet_config_from_xml(apr_pool_t * pool)
 				ptr = ptr->next;
 			}
 		}
+		else if (!apr_strnatcasecmp(elem->name, "stream"))
+		{
+			// 录音配置
+			ptr = elem->first_child;
+			while (ptr)
+			{
+				if (!apr_strnatcasecmp(ptr->name, "recordings"))
+				{
+					global_config.record_format = apr_pstrdup(ptr->first_cdata.first->text);
+				}				
+				ptr = ptr->next;
+			}
+		}
 		else if (!apr_strnatcasecmp(elem->name, "http"))
 		{
 			// http配置

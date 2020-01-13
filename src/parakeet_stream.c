@@ -4,6 +4,28 @@
 
 static parakeet_stream_manager_t * stream_globals = 0;
 
+static char *RECORD_FMT_NAMES[] = {
+	"native",
+	"normal",
+	"stereo",
+	NULL
+};
+
+static inline int get_record_format(const char* format)
+{
+    int fmt = -1;
+    int i = 0;
+	for(i = 0; i < sizeof(RECORD_FMT_NAMES)/sizeof(char*) - 1; i ++)
+	{
+	    if(!strcasecmp(format, RECORD_FMT_NAMES[i])){
+			fmt = i;
+            break;
+	    }
+	}
+    return fmt;
+}
+
+
 static inline char *get_audio_codec_name(uint8_t audio_type)
 {
 	switch (audio_type) {
@@ -31,6 +53,7 @@ static inline char *get_audio_codec_name(uint8_t audio_type)
 parakeet_errcode_t parakeet_stream_factory_init(apr_pool_t * pool)
 {
     parakeet_errcode_t err = PARAKEET_OK;
+	int val = 0;
 
 	dzlog_notice("initializing stream manager...");
 
@@ -50,7 +73,27 @@ parakeet_errcode_t parakeet_stream_factory_init(apr_pool_t * pool)
 
 	// 读写锁
 	//apr_thread_rwlock_create(&stream_globals->stream_lock, pool);
-	
+	//录音格式
+	if(parakeet_get_config()->record_format == NULL)
+	{
+	    dzlog_error("Parakeet stream manager initialized fail: config record_format not found.");
+		err = PARAKEET_FAIL;
+		goto done;
+	}
+
+	val = get_record_format(parakeet_get_config()->record_format);
+	if(val < 0)
+	{
+		dzlog_error("Parakeet stream manager initialized fail: config record_format invalid(%s).", parakeet_get_config()->record_format);
+		err = PARAKEET_FAIL;
+		goto done;   
+	}
+
+	stream_globals->record_fmt = (parakeet_record_fmt_t)val;
+
+	dzlog_notice("Parakeet stream manager initialized.");
+
+done:
     return err;
 }
 
@@ -59,9 +102,12 @@ parakeet_errcode_t parakeet_stream_create(const char* callid, enum session_direc
 {
 	parakeet_errcode_t err = PARAKEET_OK;
     parakeet_stream_t * stream;
+	parakeet_record_helper_t * rh;
 	apr_pool_t * pool;
 	char * in_path = NULL;
 	char * out_path = NULL;
+	char * audio_path = NULL;
+	apr_threadattr_t *thd_attr = NULL;
 	apr_port_t local_port;
 	apr_port_t remote_port;
 	int rv = -1;
@@ -96,20 +142,22 @@ parakeet_errcode_t parakeet_stream_create(const char* callid, enum session_direc
 	stream->callid = apr_pstrdup(pool, callid);
 	stream->pt = pt;
 	stream->remote_port = remote_port;
-	stream->buffer = parakeet_buffer_create(pool);
+
+	//缓存
+	parakeet_buffer_create_dynamic(pool, &stream->raw_buffer_in, PARAKEET_BUFFER_BLOCKSIZE, PARAKEET_BUFFER_SIZE, 0);
+	parakeet_buffer_create_dynamic(pool, &stream->raw_buffer_out, PARAKEET_BUFFER_BLOCKSIZE, PARAKEET_BUFFER_SIZE, 0);
 
 	// 锁
-	apr_thread_mutex_create(&stream->mutex, APR_THREAD_MUTEX_DEFAULT, pool);
+	apr_thread_mutex_create(&stream->mutex, APR_THREAD_MUTEX_NESTED, pool);
 	apr_thread_mutex_lock(stream->mutex);
 
-	// stream是否已经存在.
-	// map处理上需要互斥开.
+	// stream是否已经存在 map处理上需要互斥开.
 	apr_thread_rwlock_wrlock(stream_globals->map_lock);
 	if (NULL == stream_globals->streams[local_port])
 	{
 		// 不存在, 则添加, 且可以继续执行.
 		stream_globals->streams[local_port] = stream;
-		dzlog_notice("debug==== parakeet_stream_create success  callid: %s local_port:%d", callid, local_port);
+		dzlog_notice("debug==== parakeet_stream_create success callid: %s local_port:%d", callid, local_port);
 		rv = 0;
 	}
 	apr_thread_rwlock_unlock(stream_globals->map_lock);
@@ -124,18 +172,45 @@ parakeet_errcode_t parakeet_stream_create(const char* callid, enum session_direc
 		goto done;
 	}
 
-    /**
-	* 录音
-	* 原始文件 区分通道方向 in / out
-	* wav文件   区分单/双声道
-	*/
-    in_path = apr_psprintf(stream->pool, "../var/%s-%u-%u-in.%s", callid, caller_port, callee_port, get_audio_codec_name(pt));
-	out_path = apr_psprintf(stream->pool, "../var/%s-%u-%u-out.%s", callid, caller_port, callee_port, get_audio_codec_name(pt));
-	stream->audio_in = fopen(in_path, "a+");
-	stream->audio_out = fopen(out_path, "a+");
+	rh = apr_pcalloc(pool, sizeof(parakeet_record_helper_t));
 
-	dzlog_notice("debug==== parakeet_stream_create  callid: %s inpath %s ", callid, in_path);
-	dzlog_notice("debug==== parakeet_stream_create	callid: %s outpath %s ", callid, out_path);
+    assert(rh);
+
+    rh->pool = pool;
+	if(stream_globals->record_fmt = PARAKEET_RECORD_FMT_STEREO)
+	{
+	    parakeet_set_flag(rh, PMSF_STEREO);
+	}else if(stream_globals->record_fmt = PARAKEET_RECORD_FMT_NORMAL)
+	{
+	    parakeet_set_flag(rh, PMSF_NORMAL);
+	}else {
+		parakeet_set_flag(rh, PMSF_NATIVE);
+	}
+
+	if(parakeet_test_flag(rh, PMSF_NATIVE)){
+        in_path = apr_psprintf(stream->pool, "../var/%s-%u-%u-in.%s", callid, caller_port, callee_port, get_audio_codec_name(pt));
+	    out_path = apr_psprintf(stream->pool, "../var/%s-%u-%u-out.%s", callid, caller_port, callee_port, get_audio_codec_name(pt));
+	    rh->fp_raw_in = fopen(in_path, "a+");
+	    rh->fp_raw_out = fopen(out_path, "a+");
+
+	    dzlog_notice("=== debug === native parakeet_stream_create callid: %s inpath %s ", callid, in_path);
+	    dzlog_notice("=== debug === native parakeet_stream_create callid: %s outpath %s ", callid, out_path);
+	}else {
+		
+		audio_path = apr_psprintf(stream->pool, "../var/%s-%u-%u.wav", callid, caller_port, callee_port);
+		rh->fp = fopen(audio_path, "a+");
+		dzlog_notice("=== debug === audio parakeet_stream_create callid: %s path:%s ", callid, audio_path);
+	}
+
+	parakeet_set_flag(rh, PMSF_FILE_OPEN);
+
+	apr_threadattr_create(&thd_attr, pool);
+	//线程栈大小系统默认为8M，8192 * 1024byte
+	//可调优 240* 1024 byte
+	//apr_threadattr_stacksize_set(thd_attr, 240 * 1024);
+	apr_thread_create(&rh->thread, thd_attr, recording_thread, stream->rh, pool);
+
+	stream->rh = rh;
 
 	parakeet_stream_unlock(stream);
 
@@ -164,6 +239,54 @@ void parakeet_stream_unlock(parakeet_stream_t * stream)
 {
 	assert(stream);
 	apr_thread_mutex_unlock(stream->mutex);
+}
+
+
+
+static void *APR_THREAD_FUNC recording_thread(apr_thread_t *thread, void *obj)
+{
+	parakeet_record_helper_t *rh = (parakeet_record_helper_t *) obj;
+	apr_size_t bsize = PARAKEET_RECOMMENDED_BUFFER_SIZE, samples = 0, inuse = 0;
+	unsigned char *data;
+	int channels = 1;
+
+	parakeet_buffer_create_dynamic(&rh->audio_buffer, 1024 * 512, 1024 * 64, 0);
+	rh->thread_ready = 1;
+
+	channels = (stream_globals->record_fmt == PARAKEET_RECORD_FMT_STEREO) ? 2 : 1;
+	data = apr_pcalloc(rh->pool, PARAKEET_RECOMMENDED_BUFFER_SIZE);
+
+	while(parakeet_test_flag(rh->flags, PMSF_FILE_OPEN)) {
+		
+		apr_thread_mutex_lock(rh->audio_buffer_mtx);
+		inuse = parakeet_buffer_inuse(rh->audio_buffer);
+
+		if (rh->thread_ready && switch_channel_up_nosig(channel) && inuse < bsize) {
+			apr_thread_mutex_unlock(rh->audio_buffer_mtx);
+			apr_sleep(20000);
+			continue;
+		} else if ((!rh->thread_ready || switch_channel_down_nosig(channel)) && !inuse) {
+			apr_thread_mutex_unlock(rh->audio_buffer_mtx);
+			break;
+		}
+
+		samples = parakeet_buffer_read(rh->audio_buffer, data, bsize) / 2 / channels;
+		switch_mutex_unlock(rh->buffer_mutex);
+
+		if (switch_core_file_write(rh->fh, data, &samples) != SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error writing %s\n", rh->file);
+			/* File write failed */
+			set_completion_cause(rh, "uri-failure");
+			if (rh->hangup_on_error) {
+				switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
+				switch_core_session_reset(session, SWITCH_TRUE, SWITCH_TRUE);
+			}
+		}
+	}
+
+	switch_core_session_rwunlock(session);
+
+	return NULL;
 }
 
 

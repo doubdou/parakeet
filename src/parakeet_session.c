@@ -643,7 +643,10 @@ parakeet_errcode_t on_parakeet_bye_ok(sip_message_t* sip)
 		break;
 	}
 	
-    //关闭写媒体流的文件描述符
+    /**
+    * 关闭写媒体流的文件描述符
+    * 如果使用buffer 需要检查buffer内数据大小
+    */
     local_port = session->local_rtp_port;
 	
 	parakeet_session_unlock(session);
