@@ -14,7 +14,6 @@
 #define			G711_U_LAW		(1)
 #define			G711_DATA_LEN	(160)
 
-
 short seg_aend[8] = {
 	0x1F, 0x3F, 0x7F, 0xFF,
 	0x1FF, 0x3FF, 0x7FF, 0xFFF
@@ -291,42 +290,100 @@ unsigned char ulaw2alaw(unsigned char uval)
 	    (unsigned char) (0x55 ^ (_u2a[0x7F ^ uval] - 1)));
 }
 
-
-apr_size_t parakeet_g711a_decoder_process(uint8_t* data,         apr_size_t len, uint8_t* decoded_data)
+/* decoded_data 由外部调用者申请内存 */
+apr_size_t parakeet_g711a_decoder_process(uint8_t* encoded_data,         apr_size_t len, uint8_t* decoded_data)
 {
 	int i;
 	uint8_t *pdst = (uint8_t *)decoded_data;
 	int out_data_len = len / sizeof(uint8_t);
  
-	if (data == NULL || decoded_data == NULL) {
+	if (encoded_data == NULL || decoded_data == NULL) {
 		return 0;
 	}
  
 	for (i = 0; i < out_data_len; i++) 
 	{
-		pdst[i] = (uint8_t)ulaw2linear((unsigned char)decoded_data[i]);
+		pdst[i] = (uint8_t)ulaw2linear((unsigned char)encoded_data[i]);
 	}
 	
 	return (i * sizeof(uint8_t));
 }
 
-
-apr_size_t parakeet_g711u_decoder_process(uint8_t* data,         apr_size_t len, uint8_t* decoded_data)
+/* decoded_data 由外部调用者申请内存 */
+apr_size_t parakeet_g711u_decoder_process(uint8_t* encoded_data,         apr_size_t len, uint8_t* decoded_data)
 {
 	int i;
 	uint8_t *pdst = (uint8_t *)decoded_data;
 	int out_data_len = len / sizeof(uint8_t);
  
-	if (data == NULL || decoded_data == NULL) {
+	if (encoded_data == NULL || decoded_data == NULL) {
 		return 0;
 	}
  
     for (i = 0; i < out_data_len; i++) 
 	{
-	    pdst[i] = (uint8_t)ulaw2linear((unsigned char)decoded_data[i]);
+	    pdst[i] = (uint8_t)ulaw2linear((unsigned char)encoded_data[i]);
     }
 	
 	return (i * sizeof(uint8_t));
 }
+
+
+parakeet_codec_implementation_t* parakeet_codec_implementation_create(apr_pool_t * pool)
+{
+	parakeet_codec_implementation_t* impl = NULL;
+
+	dzlog_notice("create and initializing codec implementation ...");
+
+	impl = apr_palloc(pool, sizeof(parakeet_codec_implementation_t));
+
+    return impl;
+}
+
+parakeet_errcode_t parakeet_core_codec_decode(parakeet_codec_t *codec,parakeet_codec_t *other_codec,
+													 void *encoded_data, uint32_t encoded_data_len, uint32_t encoded_rate,
+													 void *decoded_data, uint32_t *decoded_data_len, uint32_t *decoded_rate, unsigned int *flag)
+{
+	parakeet_errcode_t status = PARAKEET_STATUS_OK;
+
+	assert(codec != NULL);
+	assert(encoded_data != NULL);
+	assert(decoded_data != NULL);
+
+	if (!codec->implementation) {
+		dzlog_error("Decode Codec is not initialized!\n");
+		return PARAKEET_STATUS_TERM;
+	}
+
+	if (!parakeet_test_flag(codec, PARAKEET_CODEC_FLAG_DECODE)) {
+		dzlog_error("Codec decoder is not initialized!\n");
+		return PARAKEET_STATUS_TERM;
+	}
+
+	if (codec->implementation->encoded_bytes_per_packet) {
+		uint32_t frames = encoded_data_len / codec->implementation->encoded_bytes_per_packet / codec->implementation->number_of_channels;
+
+		if (frames && codec->implementation->decoded_bytes_per_packet * frames > *decoded_data_len) {
+			dzlog_error("Buffer size sanity check failed! edl:%u ebpp:%u fr:%u ddl:%u\n",
+							  encoded_data_len, codec->implementation->encoded_bytes_per_packet, frames, *decoded_data_len);
+			*decoded_data_len = codec->implementation->decoded_bytes_per_packet;
+			memset(decoded_data, 255, *decoded_data_len);
+			return PARAKEET_STATUS_OK;
+		}
+	}
+
+	if (codec->mutex) apr_thread_mutex_lock(codec->mutex);
+	status = codec->implementation->decode(codec, other_codec, encoded_data, encoded_data_len, encoded_rate,
+										   decoded_data, decoded_data_len, decoded_rate, flag);
+	if (codec->mutex) apr_thread_mutex_unlock(codec->mutex);
+
+	return status;
+}
+
+
+
+
+
+
 
 

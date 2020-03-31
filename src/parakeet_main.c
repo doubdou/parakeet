@@ -5,6 +5,8 @@
 #include "parakeet_core_sniffer.h"
 #include "parakeet_session.h"
 #include "parakeet_stream.h"
+#include "parakeet_lua_http.h"
+
 
 
 static apr_thread_cond_t * _cond = NULL;
@@ -27,7 +29,7 @@ static void usage(void)
 static int parakeet_main(int argc, char* argv[])
 {
 	apr_pool_t * pool = 0;
-	parakeet_errcode_t errcode = PARAKEET_OK;
+	parakeet_errcode_t errcode = PARAKEET_STATUS_OK;
 	int ret = 0;
 	int rv = -1;
 	
@@ -66,14 +68,14 @@ static int parakeet_main(int argc, char* argv[])
 
         //读取配置文件
         errcode = parakeet_config_load(pool);
-		if(errcode != PARAKEET_OK)
+		if(errcode != PARAKEET_STATUS_OK)
 		{
 		    dzlog_error("parakeet_config_load error(%d)", errcode);
             break;
 	    }
 		//初始化数据库
 		errcode = parakeet_mysql_init(pool);
-		if(errcode != PARAKEET_OK)
+		if(errcode != PARAKEET_STATUS_OK)
 		{
 		    dzlog_error("parakeet_mysql_init error(%d)", errcode);
             break;
@@ -81,7 +83,7 @@ static int parakeet_main(int argc, char* argv[])
 
         //嗅探器
 		errcode = parakeet_sniffer_init(pool);
-		if(errcode != PARAKEET_OK)
+		if(errcode != PARAKEET_STATUS_OK)
 		{
 		    dzlog_error("parakeet_sniffer_init error(%d)", errcode);
             break;
@@ -89,14 +91,14 @@ static int parakeet_main(int argc, char* argv[])
 
         //sip信令解析
         errcode = parakeet_session_init(pool);
-		if(errcode != PARAKEET_OK)
+		if(errcode != PARAKEET_STATUS_OK)
 		{
 		    dzlog_error("parakeet_session_init error(%d)", errcode);
             break;
 	    }		
 		//音频解码器
 		errcode = parakeet_stream_factory_init(pool);
-		if(errcode != PARAKEET_OK)
+		if(errcode != PARAKEET_STATUS_OK)
 		{
 		    dzlog_error("parakeet_audio_factory_init error(%d)", errcode);
             break;
@@ -104,14 +106,19 @@ static int parakeet_main(int argc, char* argv[])
 
         //event socket初始化
 		errcode = parakeet_event_socket_init(pool);
-		if(errcode != PARAKEET_OK)
+		if(errcode != PARAKEET_STATUS_OK)
 		{
 		    dzlog_error("parakeet_event_socket_init error(%d)", errcode);
             break;
 	    }
 
         //http服务
-        
+        if(0 != parakeet_luahttp_initialize(pool, parakeet_get_config()->http_port))
+        {
+       	    dzlog_error("parakeet_luahttp_initialize error");
+            break; 
+        }
+		
         //嗅探器启动
 		parakeet_sniffer_startup();
 
@@ -130,6 +137,13 @@ static int parakeet_main(int argc, char* argv[])
 
 	dzlog_info("------------ DESTROY ------------");
 
+	parakeet_session_destroy();
+
+	parakeet_sniffer_cleanup();
+
+	parakeet_mysql_destroy();
+
+	if (pool) apr_pool_destroy(pool);
 
     dzlog_notice("BYE!");
 		

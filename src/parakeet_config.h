@@ -1,7 +1,6 @@
 #ifndef PARAKEET_CONFIG_H
 #define PARAKEET_CONFIG_H
 
-#include <zlog.h>
 #include "parakeet_utils.h"
 #include <assert.h>
 

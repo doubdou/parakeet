@@ -1,12 +1,39 @@
 #include "parakeet_config.h"
 #include "parakeet_session.h"
 #include "parakeet_stream.h"
+#include "parakeet_core_mysqldb.h"
 
 static parakeet_session_manager_t * session_globals = 0;
 
+static const char* const SESSION_STATUS_STRING[] = 
+{
+	"STANDBY",	// 空闲
+	"DESTROY",	// 释放中
+	"INCOMING",	// 呼入中
+	"RINGBACK",	// 呼入振铃中
+	"ANSWER",	// 呼入应答
+	"TALKING",  // 呼入通话中
+	"REFUSE",	// 呼入被拒绝
+	"HANGUP",	// 挂机中
+	"USER HANGUP",	// 主叫方挂机
+	"CANCEL",		// 主叫方取消呼叫
+
+	// 呼出的情况.
+	"OUTGOING",		// 呼出中
+	"TRYING",		// 呼出已确认
+	"RINGING",		// 呼出回铃
+	"ANSWER",		// 呼出已应答
+	"CALL FAILED",	// 呼出失败
+	"HANGUP",		// 挂机
+	"USER HANGUP",	// 被叫方挂机
+	"CANCEL",		// 本方取消
+
+	"TERMINATED"	// 呼叫被终止
+};
+
 parakeet_errcode_t parakeet_session_init(apr_pool_t * pool)
 {
-	parakeet_errcode_t errcode = PARAKEET_OK;
+	parakeet_errcode_t errcode = PARAKEET_STATUS_OK;
 
 	dzlog_notice("initializing session manager...");
 
@@ -19,6 +46,7 @@ parakeet_errcode_t parakeet_session_init(apr_pool_t * pool)
 	apr_thread_rwlock_create(&session_globals->session_lock, pool);
 
 	session_globals->next_session_id = 1;
+	session_globals->running = 1;
 	session_globals->sessions = apr_hash_make(session_globals->pool);
 	
 	// 线程池: 用于处理状态超时任务.
@@ -26,17 +54,105 @@ parakeet_errcode_t parakeet_session_init(apr_pool_t * pool)
 	apr_thread_pool_create(&session_globals->state_thread_pool, 4, 16, session_globals->pool);
 
 	// 线程: 状态处理, 扫描所有会话, 检查超时.
+	
 	apr_thread_create(&session_globals->state_thread_main, 0, parakeet_session_state_machine, 0, session_globals->pool);
 
 	return errcode;
 }
 
+void parakeet_session_destroy(void)
+{
+	// 销毁会话.
+	if (session_globals)
+	{
+		if (session_globals->sessions)
+		{
+			apr_hash_index_t * hi;
+			parakeet_session_t * session;
+
+			dzlog_info("destroy sessions");
+			for (hi = apr_hash_first(0, session_globals->sessions); hi; hi = apr_hash_next(hi))
+			{
+				session = apr_hash_this_val(hi);
+				if (session->invite) sip_message_free(session->invite);
+				apr_pool_destroy(session->pool);
+			}
+			apr_hash_clear(session_globals->sessions);
+		}
+		apr_pool_destroy(session_globals->pool);
+		session_globals->running = 0;
+	}
+}
+
 
 void * APR_THREAD_FUNC parakeet_session_state_machine(apr_thread_t * thread, void * param)
 {
+	// 会话状态处理.判断超时情况.
+	
+	apr_hash_index_t * hi;
+	apr_time_t now, last;
+	apr_uint32_t interval;
+	//apr_uint32_t call_limit = parakeet_get_config()->call_limit * 1000;// 转换为毫秒.
+	parakeet_session_t * session;
+
+//#ifdef _DEBUG
+//  static unsigned int __seq__ = 0;
+//#endif
 
 	dzlog_notice("StateMachine: thread[%p] running...", thread);
 
+    last = apr_time_now() / 1000;
+	while(session_globals->running)
+	{
+        now = apr_time_now();
+
+		now /= 1000;
+
+		interval = (apr_uint32_t)(now - last);   //使用毫秒(ms)
+		last = now;
+
+		apr_thread_rwlock_rdlock(session_globals->session_lock);
+		for (hi = apr_hash_first(0, session_globals->sessions); hi; hi = apr_hash_next(hi))
+		{
+		    session = apr_hash_this_val(hi);
+		    session->status_duration += interval;
+
+			if (APR_SUCCESS == apr_thread_mutex_trylock(session->mutex))
+			{
+				switch (session->status)
+				{
+				   case STATUS_DESTROY:
+				   				// 销毁会话.
+				       parakeet_execute_task(on_session_timeout_destroy);
+				       break;
+				   default:
+				   	   break;
+				}
+				apr_thread_mutex_unlock(session->mutex);
+			}
+		}
+
+
+		apr_thread_rwlock_unlock(session_globals->session_lock);
+
+
+#define TIMER_INTERVAL		1000	// 会话状态机间隔时间.
+		// 如果消息太多, 则延时短一点.
+		// 根据上一次的间隔,调整本次间隔. 
+		if (interval < TIMER_INTERVAL)
+		{
+			apr_sleep(TIMER_INTERVAL * 1000);
+		}
+		else if (interval < 2* TIMER_INTERVAL)	// 延时1500的话, 本地只需要sleep 500
+		{
+			// 毫秒到微秒.
+			apr_sleep((2 * TIMER_INTERVAL - (apr_interval_time_t)interval) * 1000);
+		}
+		else
+		{
+			dzlog_warn("!!!session state machine busy, interval:%u!!!", interval);
+		}		
+	}
 
 	dzlog_notice("StateMachine: thread[%p] exit...", thread);
     return NULL;
@@ -69,7 +185,7 @@ void parakeet_session_unlock(parakeet_session_t * session)
 
 parakeet_errcode_t on_parakeet_invite(sip_message_t* sip, packet_direction_t d)
 {
-    parakeet_errcode_t err = PARAKEET_OK;
+    parakeet_errcode_t err = PARAKEET_STATUS_OK;
 	// 核心函数: 呼叫请求处理
 
 	parakeet_session_t* session = NULL;
@@ -283,14 +399,14 @@ parakeet_errcode_t  on_parakeet_reinvite(parakeet_session_t * session, sip_messa
 
 parakeet_errcode_t on_parakeet_ack(sip_message_t* sip)
 {
-    parakeet_errcode_t err = PARAKEET_OK;
+    parakeet_errcode_t err = PARAKEET_STATUS_OK;
 
 	parakeet_session_t * session;
 
 	session = parakeet_session_locate(sip_message_get_call_id(sip));
 	if (NULL == session)
 	{
-		return PARAKEET_NOT_EXIST;
+		return PARAKEET_STATUS_NOT_EXIST;
 	}
 
 	switch (session->status)
@@ -356,13 +472,13 @@ parakeet_errcode_t on_parakeet_ack(sip_message_t* sip)
 parakeet_errcode_t on_parakeet_bye(sip_message_t* sip, packet_direction_t d)
 {
 	// BYE消息挂机.
-	parakeet_errcode_t err = PARAKEET_OK;
+	parakeet_errcode_t err = PARAKEET_STATUS_OK;
 	parakeet_session_t * session;
 
 	session = parakeet_session_locate(sip_message_get_call_id(sip));
 	if (NULL == session)
 	{
-		return PARAKEET_NOT_EXIST;
+		return PARAKEET_STATUS_NOT_EXIST;
 	}
 	
 	switch (session->status)
@@ -414,14 +530,14 @@ parakeet_errcode_t on_parakeet_bye(sip_message_t* sip, packet_direction_t d)
 
 parakeet_errcode_t on_parakeet_cancel(sip_message_t* sip)
 {
-    parakeet_errcode_t err = PARAKEET_OK;
+    parakeet_errcode_t err = PARAKEET_STATUS_OK;
 	
     return err;
 }
 
 parakeet_errcode_t on_parakeet_register(sip_message_t* sip)
 {
-    parakeet_errcode_t err = PARAKEET_OK;
+    parakeet_errcode_t err = PARAKEET_STATUS_OK;
 	
     return err;
 }
@@ -429,21 +545,21 @@ parakeet_errcode_t on_parakeet_register(sip_message_t* sip)
 
 parakeet_errcode_t on_parakeet_options(sip_message_t* sip)
 {
-    parakeet_errcode_t err = PARAKEET_OK;
+    parakeet_errcode_t err = PARAKEET_STATUS_OK;
 	
     return err;
 }
 
 parakeet_errcode_t on_parakeet_info(sip_message_t* sip)
 {
-    parakeet_errcode_t err = PARAKEET_OK;
+    parakeet_errcode_t err = PARAKEET_STATUS_OK;
 	
     return err;
 }
 
 parakeet_errcode_t on_parakeet_unknown(sip_message_t* sip)
 {
-    parakeet_errcode_t err = PARAKEET_OK;
+    parakeet_errcode_t err = PARAKEET_STATUS_OK;
 	
     return err;
 }
@@ -451,7 +567,7 @@ parakeet_errcode_t on_parakeet_unknown(sip_message_t* sip)
 parakeet_errcode_t on_parakeet_trying(sip_message_t* sip)
 {
 	parakeet_session_t * session;
-	parakeet_errcode_t err = PARAKEET_OK;
+	parakeet_errcode_t err = PARAKEET_STATUS_OK;
 
 	TRACE("==== TRYING ==== Locate[%s]", sip_message_get_call_id(sip));
 	session = parakeet_session_locate(sip_message_get_call_id(sip));
@@ -490,7 +606,7 @@ parakeet_errcode_t on_parakeet_trying(sip_message_t* sip)
 
 parakeet_errcode_t on_parakeet_ringing(sip_message_t* sip)
 {
-    parakeet_errcode_t err = PARAKEET_OK;	
+    parakeet_errcode_t err = PARAKEET_STATUS_OK;	
 
 	parakeet_session_t * session;
 	session = parakeet_session_locate(sip_message_get_call_id(sip));
@@ -517,7 +633,7 @@ parakeet_errcode_t on_parakeet_ringing(sip_message_t* sip)
 
 parakeet_errcode_t on_parakeet_answer(sip_message_t* sip)
 {
-    parakeet_errcode_t err = PARAKEET_OK;	
+    parakeet_errcode_t err = PARAKEET_STATUS_OK;	
 	parakeet_session_t * session;
 	sdp_message_t * invite_sdp;
 	sdp_message_t * answer_sdp;
@@ -533,7 +649,7 @@ parakeet_errcode_t on_parakeet_answer(sip_message_t* sip)
 	if (0 == session)
 	{
 		// 不存在的呼叫.
-		return PARAKEET_NOT_EXIST;
+		return PARAKEET_STATUS_NOT_EXIST;
 	}
 
     //修改状态
@@ -591,15 +707,15 @@ parakeet_errcode_t on_parakeet_answer(sip_message_t* sip)
     //临时处理     没有做参数检查
 	err = parakeet_stream_create(callid, direct, caller_port, callee_port, pt);
 
-    dzlog_info("[%s][%u] on_parakeet_answer  caller:%s %s", session->callid, session->ref, invite_m->m_media, invite_m->m_port);
-	dzlog_info("[%s][%u] on_parakeet_answer  callee:%s %s", session->callid, session->ref, answer_m->m_media, answer_m->m_port);
+    dzlog_info("[%s][%u] on_parakeet_answer caller:%s %s", session->callid, session->ref, invite_m->m_media, invite_m->m_port);
+	dzlog_info("[%s][%u] on_parakeet_answer callee:%s %s", session->callid, session->ref, answer_m->m_media, answer_m->m_port);
 
     return err;
 }
 
 parakeet_errcode_t on_parakeet_info_ok(sip_message_t* sip)
 {
-    parakeet_errcode_t err = PARAKEET_OK;
+    parakeet_errcode_t err = PARAKEET_STATUS_OK;
 	
     return err;
 }
@@ -614,7 +730,7 @@ parakeet_errcode_t on_parakeet_bye_ok(sip_message_t* sip)
 	session = parakeet_session_locate(sip_message_get_call_id(sip));
 	if (NULL == session)
 	{
-		return PARAKEET_NOT_EXIST;
+		return PARAKEET_STATUS_NOT_EXIST;
 	}
 
 	switch (session->status)
@@ -652,17 +768,10 @@ parakeet_errcode_t on_parakeet_bye_ok(sip_message_t* sip)
 	parakeet_session_unlock(session);
 
 	stream = parakeet_stream_locate(local_port);
+	
     assert(stream);
-    if(stream->audio_in)
-    {
-       fclose(stream->audio_in);
-	   stream->audio_in = NULL;
-    }
-	else if(stream->audio_out)
-	{
-	    fclose(stream->audio_out);
-	    stream->audio_out = NULL;
-	}
+
+	parakeet_set_flag(stream, PSSF_STREAM_CLOSE);
 
 	parakeet_stream_unlock(stream);
 	
@@ -672,21 +781,21 @@ parakeet_errcode_t on_parakeet_bye_ok(sip_message_t* sip)
 
 parakeet_errcode_t on_parakeet_cancel_ok(sip_message_t* sip)
 {
-    parakeet_errcode_t err = PARAKEET_OK;
+    parakeet_errcode_t err = PARAKEET_STATUS_OK;
 	
     return err;
 }
 
 parakeet_errcode_t on_parakeet_callfail(sip_message_t* sip)
 {
-    parakeet_errcode_t err = PARAKEET_OK;
+    parakeet_errcode_t err = PARAKEET_STATUS_OK;
 	
     return err;
 }
 
 parakeet_errcode_t on_parakeet_terminated(sip_message_t* sip)
 {
-    parakeet_errcode_t err = PARAKEET_OK;
+    parakeet_errcode_t err = PARAKEET_STATUS_OK;
 	
     return err;
 }
@@ -694,7 +803,7 @@ parakeet_errcode_t on_parakeet_terminated(sip_message_t* sip)
 parakeet_errcode_t on_parakeet_authentication_required(sip_message_t* sip)
 {
 	parakeet_session_t * session;
-	parakeet_errcode_t err = PARAKEET_OK;
+	parakeet_errcode_t err = PARAKEET_STATUS_OK;
 	 
 	session = parakeet_session_locate(sip_message_get_call_id(sip));
 	//assert(session);
@@ -725,11 +834,238 @@ parakeet_errcode_t on_parakeet_authentication_required(sip_message_t* sip)
 
 parakeet_errcode_t on_parakeet_transaction_does_not_exist(sip_message_t* sip)
 {
-    parakeet_errcode_t err = PARAKEET_OK;
+    parakeet_errcode_t err = PARAKEET_STATUS_OK;
 	
     return err;
 }
 
+void parakeet_cdr_write(parakeet_session_t * session)
+{
+	// 写话单
+	char sql[1024];
+	int len;
+	int sec = 0;
+
+	assert(session->invite_time > 0);
+	assert(session->hangup_time >= session->invite_time);
+	assert(parakeet_get_config()->cdr_enable);
+
+	if (STATUS_STANDBY == session->status ||
+		NULL == session->invite ||
+		NULL == session->from_username ||
+		NULL == session->to_username)
+	{
+		return;
+	}
+
+	// FIELDS
+	len = sprintf(sql, 
+		"INSERT INTO cdr%s (ref,callid,caller,callee,direction,gateway_id,invite_time,", 
+		parakeet_mysql_cdr_date());
+	if (session->ring_time > 0) len += sprintf(sql + len, "ring_time,");
+	if (session->answer_time > 0)
+	{
+		len += sprintf(sql + len, "answer_time,");
+		sec = (int)(session->hangup_time - session->answer_time);
+	}
+	len += sprintf(sql + len, "hangup_time,talk_second,hangup_cause) VALUES(");
+
+	// VALUE
+	len += sprintf(sql + len, "%u,'%s','%s','%s',%d,%d,FROM_UNIXTIME(%ld),",
+		session->ref,
+		session->callid, session->from_username, session->to_username,
+		(DIR_TYPE_INCOMING == session->dir) ? 0 : 1,
+		session->gateway_id, (long)session->invite_time);
+
+	if (session->ring_time > 0) len += sprintf(sql + len, "FROM_UNIXTIME(%ld),", (long)session->ring_time);
+	if (session->answer_time > 0) len += sprintf(sql + len, "FROM_UNIXTIME(%ld),", (long)session->answer_time);
+	len += sprintf(sql + len, "FROM_UNIXTIME(%ld),%d,%d);", (long)session->hangup_time, sec, session->hangup_cause);
+	parakeet_mysql_push(sql);
+}
+
+
+DECLARE_TASK_INTERFACE(on_session_timeout_destroy)
+{
+	// 任意情况的会话最终销毁操作都会进入本函数处理.
+	parakeet_session_t * session = (parakeet_session_t *)param;
+
+	apr_thread_rwlock_wrlock(session_globals->session_lock);
+	if (APR_SUCCESS != apr_thread_mutex_trylock(session->mutex))
+	{
+		apr_thread_rwlock_unlock(session_globals->session_lock);
+		return NULL;
+	}
+
+	assert(session->callid);
+	apr_hash_set(session_globals->sessions, session->callid, APR_HASH_KEY_STRING, 0);
+
+	apr_thread_mutex_unlock(session->mutex);
+
+	apr_thread_rwlock_unlock(session_globals->session_lock);
+
+	// 写话单.
+	if (parakeet_get_config()->cdr_enable)
+	{
+		parakeet_cdr_write(session);
+	}
+	
+	dzlog_info("[%s][%u] destroy!", session->callid, session->ref);
+
+	if (session->invite) sip_message_free(session->invite);
+	if (session->lastsip) sip_message_free(session->lastsip);
+	
+	apr_thread_mutex_destroy(session->mutex);
+	apr_pool_destroy(session->pool);
+
+	return NULL;
+}
+
+int parakeet_session_http_query(struct evbuffer * evb,
+	int page, int pageSize,
+	int gateway_id, const char * caller, const char * callee,
+	int direction, int status)
+{
+	// 扫描所有会话. 这个操作比较耗时.
+	apr_hash_index_t * hi;
+	parakeet_session_t * s = 0;
+
+	apr_uint32_t total = 0;
+	apr_uint32_t offset = 0;
+
+	// 实际开始位置
+	apr_uint32_t start = (page-1) * pageSize;
+	// 最大位置.
+	apr_uint32_t end = start + pageSize;
+	// 呼叫方向.
+	enum session_direction_t  dir = DIR_TYPE_ANY;
+	// 呼叫状态.
+//	enum session_status_t status = STATUS_STANDBY;
+
+	if (1 == direction) dir = DIR_TYPE_INCOMING;
+	else if (2 == direction) dir = DIR_TYPE_OUTGOING;
+
+	evbuffer_add_printf(evb, "{\"code\":0,\"data\":{\"page\":%u,\"pageSize\":%u,\"data\":[",
+		page, pageSize);
+
+	apr_thread_rwlock_rdlock(session_globals->session_lock);
+	for (hi = apr_hash_first(0, session_globals->sessions); hi; hi = apr_hash_next(hi))
+	{
+		s = apr_hash_this_val(hi);
+
+		apr_thread_mutex_lock(s->mutex);
+
+		do
+		{
+			if (s->ref == 0)
+				break;
+
+			// 比较: 网关
+			if (gateway_id > 0 )
+			{
+				// if (0 != apr_strnatcmp(gateway_name, s->gateway_name))
+				if (gateway_id != s->gateway_id)
+				{
+					// 不符合.
+					TRACE("Session.dismatch");
+					break;
+				}
+			}
+
+			// 比较: 主叫号码(模糊匹配)
+			if (caller && s->from_username)
+			{
+				if (NULL == strstr(s->from_username, caller))
+				{
+					// 不符合
+					TRACE("Session.dismatch");
+					break;
+				}
+			}
+
+			// 比较: 被叫号码(模糊匹配)
+			if (callee && s->to_username)
+			{
+				if (NULL == strstr(s->to_username, callee))
+				{
+					// 不符合
+					TRACE("Session.dismatch");
+					break;
+				}
+			}
+
+			// 比较: 呼叫方向
+			if (DIR_TYPE_ANY != dir)
+			{
+				// 方向.
+				if (s->dir != dir)
+				{
+					TRACE("Session.dismatch");
+					break;
+				}
+			}
+
+			// 比较: 会话状态.
+			if (STATUS_STANDBY != status)
+			{
+				if (s->status != status)
+				{
+					TRACE("Session.dismatch");
+					break;
+				}
+			}
+
+			// 所有条件符合.
+			if(offset >= start && offset < end)
+			{
+				struct tm * ptm = localtime(&s->invite_time);
+
+				if (offset != start) evbuffer_add(evb, ",", 1);
+
+				// 会话信息.
+
+				evbuffer_add_printf(evb,
+					"{"
+					"\"index\":%u"
+					",\"callid\":\"%s\""
+					",\"ref\":%u"
+					",\"caller\":\"%s\""
+					",\"callee\":\"%s\""
+					",\"gateway_id\":%d"
+					",\"status_code\":%d"
+					",\"status_desc\":\"%s\""
+					",\"duration\":%u"
+					",\"direction\":\"%s\""
+					",\"start\":\"%d-%d-%d %02d:%02d:%02d\""
+					"}",
+					offset,
+					s->callid,
+					s->ref,
+					s->from_username,
+					s->to_username,
+					s->gateway_id,
+					s->status,
+					SESSION_STATUS_STRING[s->status],
+					s->status_duration,
+					(DIR_TYPE_INCOMING == s->dir) ? DIR_STR_INCOMING : DIR_STR_OUTGOING,
+					ptm->tm_year + 1900, ptm->tm_mon + 1, ptm->tm_mday, ptm->tm_hour, ptm->tm_min, ptm->tm_sec);
+			}
+			offset++;
+			total++;
+
+			TRACE("Session.Match Success, Offset:%d, Total:%d", offset, total);
+
+		} while (0);
+
+		TRACE("hi=%p", hi);
+
+		apr_thread_mutex_unlock(s->mutex);
+	}
+
+	apr_thread_rwlock_unlock(session_globals->session_lock);
+
+	evbuffer_add_printf(evb, "],\"total\":%u}}", total);
+	return total;
+}
 
 
 

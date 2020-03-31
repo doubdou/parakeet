@@ -97,7 +97,7 @@ static int parakeet_config_from_xml(apr_pool_t * pool)
 			{
 				if (!apr_strnatcasecmp(ptr->name, "recordings"))
 				{
-					global_config.record_format = apr_pstrdup(ptr->first_cdata.first->text);
+					global_config.record_format = apr_pstrdup(pool, ptr->first_cdata.first->text);
 				}				
 				ptr = ptr->next;
 			}
@@ -196,10 +196,10 @@ static int parakeet_config_from_xml(apr_pool_t * pool)
 
 parakeet_errcode_t parakeet_config_load(apr_pool_t * pool)
 {
-    parakeet_errcode_t err = PARAKEET_OK;
+    parakeet_errcode_t err = PARAKEET_STATUS_OK;
 
 	err = parakeet_config_from_xml(pool);
-	if(err != PARAKEET_OK)
+	if(err != PARAKEET_STATUS_OK)
 	{
         dzlog_error("parakeet_config_from_xml error (%d)", err);
 	    goto done;

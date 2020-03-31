@@ -26,6 +26,13 @@ cd zlog-1.2.12
 make PREFIX=$TARGET
 make PREFIX=$TARGET install
 
+cd ..
+tar xvf libevent-2.1.8-stable.tar.gz
+cd libevent-2.1.8-stable
+sh autogen.sh
+./configure --prefix=$TARGET
+make clean && make && make install
+
 
 #$MAKE maintainer-clean >/dev/null 2>/dev/null
 #

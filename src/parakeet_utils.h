@@ -8,6 +8,7 @@
 #endif
 
 #include <stdio.h>
+#include <stdlib.h>
 
 // APR 库.
 #include "apr-1/apr.h"
@@ -33,16 +34,40 @@
 #include <apr-1/apr_md5.h>
 #include <apr-1/apr_uuid.h>
 
+#include "parakeet_types.h"
+#include "parakeet_com.h"
+
+#include <mysql/mysql.h>
+
+#ifdef _WIN32
+#include <cJSON.h>
+#include <zlog/zlog.h>
+#else
+#include "../cJSON/cJSON.h"
+#include <zlog.h>
+#endif
+
+#include "../liblua5.2/lua.h"
+#include "../liblua5.2/lualib.h"
+#include "../liblua5.2/lapi.h"
+#include "../liblua5.2/lauxlib.h"
 
 #include "../libfranksip/sip_message.h"
 #include "../libfranksip/sdp_message.h"
 
-/* size of the buffer */
-#define PARAKEET_BUFFER_SIZE       (1024 * 64)
-#define PARAKEET_BUFFER_BLOCKSIZE  (1024 * 512)
-#define PARAKEET_BYTES_PER_SAMPLE  (2)	      /* 2 bytes per sample */
+#ifdef _WIN32
+#include <Windows.h>
+#pragma warning(disable: 4996)
+#else
+#include <unistd.h>
+#endif
 
-#define PARAKEET_RECOMMENDED_BUFFER_SIZE (8192)
+#include <event2/event.h>
+#include <event2/buffer.h>
+#include <event2/http.h>
+#include <event2/keyvalq_struct.h>
+
+#define parakeet_normalize_to_16bit(n) if (n > PARAKEET_SMAX) n = PARAKEET_SMAX; else if (n < PARAKEET_SMIN) n = PARAKEET_SMIN;
 
 /*!
   \brief Test for the existance of a flag on an arbitary object
@@ -59,6 +84,31 @@
 */
 #define parakeet_set_flag(obj, flag) (obj)->flags |= (flag)
 
+/*!
+  \brief Set a flag on an arbitrary object while locked
+  \param obj the object to set the flags on
+  \param flag the or'd list of flags to set
+*/
+#define parakeet_set_flag_locked(obj, flag) assert((obj)->flag_mutex != NULL); \
+apr_thread_mutex_lock((obj)->flag_mutex);								\
+(obj)->flags |= (flag);\
+apr_thread_mutex_unlock((obj)->flag_mutex);
+
+/*!
+  \brief Clear a flag on an arbitrary object
+  \param obj the object to test
+  \param flag the or'd list of flags to clear
+*/
+#define parakeet_clear_flag_locked(obj, flag) apr_thread_mutex_lock((obj)->flag_mutex); (obj)->flags &= ~(flag); apr_thread_mutex_unlock((obj)->flag_mutex);
+
+
+/*!
+  \brief Clear a flag on an arbitrary object while locked
+  \param obj the object to test
+  \param flag the or'd list of flags to clear
+*/
+#define parakeet_clear_flag(obj, flag) (obj)->flags &= ~(flag)
+
 
 /*!
   \brief Free a pointer and set it to NULL unless it already is NULL
@@ -66,20 +116,32 @@
 */
 #define parakeet_safe_free(it) if (it) {free(it);it=NULL;}
 
+/*!
+  \brief Test for NULL or zero length string
+  \param s the string to test
+  \return true value if the string is NULL or zero length
+*/
+static inline int _zstr(const char *s)
+{
+	return !s || *s == '\0';
+}
+
+#define zstr(x)  _zstr(x)
 
 typedef enum parakeet_errcode_e{
-    PARAKEET_OK,
-	PARAKEET_FAIL,
-	PARAKEET_MEMERR,
-	PARAKEET_TIMEOUT,
-	PARAKEET_PARAM_INVALID,
-	PARAKEET_INTR,
-	PARAKEET_INUSE,
-	PARAKEET_NOT_EXIST,
-	PARAKEET_SOCKERR,
-	PARAKEET_BREAK,
-	PARAKEET_TERM,
-	PARAKEET_DATA_ERROR,
+    PARAKEET_STATUS_OK,
+	PARAKEET_STATUS_FAIL,
+	PARAKEET_STATUS_MEMERR,
+	PARAKEET_STATUS_TIMEOUT,
+	PARAKEET_STATUS_PARAM_INVALID,
+	PARAKEET_STATUS_INTR,
+	PARAKEET_STATUS_INUSE,
+	PARAKEET_STATUS_NOT_EXIST,
+	PARAKEET_STATUS_SOCKERR,
+	PARAKEET_STATUS_BREAK,
+	PARAKEET_STATUS_TERM,
+	PARAKEET_STATUS_GENERR,
+	PARAKEET_STATUS_DATA_ERROR,
 }parakeet_errcode_t;
 
 #define DIR_STR_INCOMING	"incoming"

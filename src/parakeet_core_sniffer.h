@@ -31,6 +31,8 @@ parakeet_errcode_t parakeet_sniffer_init(apr_pool_t * pool);
 
 parakeet_errcode_t parakeet_sniffer_startup(void);
 
+parakeet_errcode_t parakeet_sniffer_cleanup(void);
+
 parakeet_errcode_t parakeet_sip_message_entry(uint8_t* data, uint32_t data_len, packet_direction_t d);
 
 parakeet_errcode_t parakeet_rtp_message_entry(uint8_t* data, uint32_t data_len, packet_direction_t d, apr_port_t sport, apr_port_t dport);

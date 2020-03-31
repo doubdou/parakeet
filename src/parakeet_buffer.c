@@ -1,30 +1,10 @@
 #include "parakeet_config.h"
+#include "parakeet_com.h"
+#include "parakeet_utils.h"
 #include "parakeet_buffer.h"
 
 
 static uint32_t buffer_id = 0;
-
-typedef enum {
-	PARAKEET_BUFFER_FLAG_DYNAMIC = (1 << 0),
-	PARAKEET_BUFFER_FLAG_PARTITION = (1 << 1)
-} parakeet_buffer_flag_t;
-
-
-struct parakeet_buffer_s {
-	apr_size_t *data;
-	apr_size_t *head;
-	apr_size_t used;
-	apr_size_t actually_used;
-	apr_size_t datalen;
-	apr_size_t max_len;
-	apr_size_t blocksize;
-	apr_thread_mutex_t *mutex;
-	uint32_t flags;
-	uint32_t id;
-	int32_t loops;
-};
-
-
 
 parakeet_errcode_t parakeet_buffer_create(apr_pool_t *pool, parakeet_buffer_t **buffer, apr_size_t max_len)
 {
@@ -35,9 +15,9 @@ parakeet_errcode_t parakeet_buffer_create(apr_pool_t *pool, parakeet_buffer_t **
 		new_buffer->id = buffer_id++;
 		new_buffer->head = new_buffer->data;
 		*buffer = new_buffer;
-		return PARAKEET_OK;
+		return PARAKEET_STATUS_OK;
 	}
-	return PARAKEET_MEMERR;
+	return PARAKEET_STATUS_MEMERR;
 }
 
 parakeet_errcode_t parakeet_buffer_create_dynamic(parakeet_buffer_t **buffer, apr_size_t blocksize, apr_size_t start_len, apr_size_t max_len)
@@ -51,7 +31,7 @@ parakeet_errcode_t parakeet_buffer_create_dynamic(parakeet_buffer_t **buffer, ap
 			if (!(new_buffer->data = malloc(start_len))) {
 				free(new_buffer);
 				*buffer = NULL;
-				return PARAKEET_MEMERR;
+				return PARAKEET_STATUS_MEMERR;
 			}
 			memset(new_buffer->data, 0, start_len);
 		}
@@ -64,10 +44,10 @@ parakeet_errcode_t parakeet_buffer_create_dynamic(parakeet_buffer_t **buffer, ap
 		parakeet_set_flag(new_buffer, PARAKEET_BUFFER_FLAG_DYNAMIC);
 
 		*buffer = new_buffer;
-		return PARAKEET_OK;
+		return PARAKEET_STATUS_OK;
 	}
 	*buffer = NULL;
-	return PARAKEET_MEMERR;
+	return PARAKEET_STATUS_MEMERR;
 }
 
 
@@ -88,7 +68,7 @@ parakeet_errcode_t parakeet_buffer_trylock(parakeet_buffer_t *buffer)
 	if (buffer->mutex) {
 		return apr_thread_mutex_lock(buffer->mutex);
 	}
-	return PARAKEET_FAIL;
+	return PARAKEET_STATUS_FAIL;
 }
 
 void parakeet_buffer_unlock(parakeet_buffer_t *buffer)
@@ -105,7 +85,7 @@ apr_size_t parakeet_buffer_len(parakeet_buffer_t *buffer)
 
 apr_size_t parakeet_buffer_freespace(parakeet_buffer_t *buffer)
 {
-	if (parakeet_test_flag(buffer, SWITCH_BUFFER_FLAG_DYNAMIC)) {
+	if (parakeet_test_flag(buffer, PARAKEET_BUFFER_FLAG_DYNAMIC)) {
 		if (buffer->max_len) {
 			return (apr_size_t) (buffer->max_len - buffer->used);
 		}
@@ -120,7 +100,26 @@ apr_size_t parakeet_buffer_inuse(parakeet_buffer_t *buffer)
 	return buffer->used;
 }
 
-void parakeet_buffer_destroy(parakeet_buffer_t * buffer)
+apr_size_t parakeet_buffer_toss(parakeet_buffer_t *buffer, apr_size_t datalen)
+{
+	apr_size_t reading = 0;
+
+	if (buffer->used < 1) {
+		buffer->used = 0;
+		return 0;
+	} else if (buffer->used >= datalen) {
+		reading = datalen;
+	} else {
+		reading = buffer->used;
+	}
+
+	buffer->used -= reading;
+	buffer->head += reading;
+
+	return buffer->used;
+}
+
+void parakeet_buffer_destroy(parakeet_buffer_t** buffer)
 {
    if (buffer && *buffer) {
 	   if ((parakeet_test_flag((*buffer), PARAKEET_BUFFER_FLAG_DYNAMIC))) {

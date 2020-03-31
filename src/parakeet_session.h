@@ -1,6 +1,9 @@
 #ifndef PARAKEET_SESSION_H
 #define PARAKEET_SESSION_H
 
+#include "parakeet_types.h"
+#include "parakeet_utils.h"
+
 enum session_status_t
 {
 	STATUS_STANDBY = 0,
@@ -120,6 +123,12 @@ struct parakeet_session_t
 	sip_message_t * lastsip;		///< 最后发送的SIP包, 需要重发SIP消息时使用.
 };
 
+#define DECLARE_TASK_INTERFACE(f) void * APR_THREAD_FUNC f(apr_thread_t * thread, void * param)
+#define parakeet_execute_task(fun)  if(!session->in_task) { \
+		session->in_task=1; \
+		apr_thread_pool_push(session_globals->state_thread_pool, fun, (void*)session, 0, NULL); }
+
+
 typedef struct parakeet_session_manager_t parakeet_session_manager_t;
 struct parakeet_session_manager_t
 {
@@ -132,10 +141,15 @@ struct parakeet_session_manager_t
     // 状态机
 	apr_thread_t * state_thread_main;
 	apr_thread_pool_t * state_thread_pool;
+	apr_byte_t running;                 ///< 状态机运行标记
 };
 
+//会话状态管理接口
+DECLARE_TASK_INTERFACE(on_session_timeout_destroy);
 
 parakeet_errcode_t parakeet_session_init(apr_pool_t * pool);
+
+void parakeet_session_destroy(void);
 
 void * APR_THREAD_FUNC parakeet_session_state_machine(apr_thread_t * thread, void * param);
 
@@ -183,6 +197,8 @@ parakeet_errcode_t on_parakeet_authentication_required(sip_message_t* sip);
 
 parakeet_errcode_t on_parakeet_transaction_does_not_exist(sip_message_t* sip);
 
+int parakeet_session_http_query(struct evbuffer * evb, int page, int pageSize, int gateway_id, 
+	                                   const char * caller, const char * callee, int direction, int status);
 
 #endif
 

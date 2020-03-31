@@ -11,11 +11,15 @@ parakeet_SOURCES = \
             parakeet_main.c \
             parakeet_stream.c \
             parakeet_config.c \
-			parakeet_codec.c \
+            parakeet_codec.c \
             parakeet_core_mysqldb.c \
             parakeet_core_sniffer.c \
             parakeet_event_socket.c \
-            parakeet_session.c 
+            parakeet_session.c \
+            parakeet_buffer.c \
+            parakeet_core_file.c \
+            parakeet_lua_base.c \
+            parakeet_lua_http.c
 
 #####################################################################
 #load flags
@@ -27,9 +31,12 @@ parakeet_LDADD = \
               -L$(prefix)/lib \
               -lapr-1 \
               -laprutil-1 \
+              -llua \
               -lzlog \
+              -levent \
               -lpcap \
-              -lfranksip
+              -lfranksip \
+              -L/usr/lib64/mysql -lmysqlclient
 
 #####################################################################
 # Configuration files

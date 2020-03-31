@@ -151,7 +151,7 @@ typedef struct rtppacket_s{
 
 typedef struct rtp_msg_s{
 	rtp_header_t  	rtp_hdr;
-	void*          	body;
+	char          	body[0];
 }rtp_msg_t;
 
 
